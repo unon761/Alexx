@@ -66,8 +66,8 @@ logging.basicConfig(
 logger = logging.getLogger("CollageBotSuite")
 
 # Core Environment Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8824882366:AAFwQPwk3CZZ2XPZkY_LoGw7unb103sCulk")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "2077444542"))
 DB_FILE = str(BASE_DIR / "collage_bot_v2.db")
 
 # Collage & Billing Constants
