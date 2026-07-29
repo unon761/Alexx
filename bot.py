@@ -66,8 +66,8 @@ logging.basicConfig(
 logger = logging.getLogger("CollageBotSuite")
 
 # Core Environment Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8824882366:AAFwQPwk3CZZ2XPZkY_LoGw7unb103sCulk")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "2077444542"))
 DB_FILE = str(BASE_DIR / "collage_bot_v2.db")
 
 # Collage & Billing Constants
@@ -85,6 +85,9 @@ GARBAGE_RUN_INTERVAL_SEC = 300   # Auto GC background job runs every 5 minutes
 SLOT_HEIGHT = 1000
 GAP_SIZE = 8
 BG_COLOR = (240, 240, 240)
+
+# Message Status Tracker (Keeps track of message IDs for editing update counts)
+USER_STATUS_MSGS: Dict[int, int] = {}
 
 
 # ==============================================================================
@@ -713,7 +716,7 @@ def format_subscription_status(user_data: Dict[str, Any]) -> str:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not user:
+    if not user or not update.message:
         return
 
     db_user = db.register_user_if_not_exists(user)
@@ -741,6 +744,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     help_text = (
         "📖 **Collage Layout Grid Rules**:\n\n"
         "• 2 photos  → 2×1\n"
@@ -761,7 +766,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not user:
+    if not user or not update.message:
         return
 
     db_user = db.register_user_if_not_exists(user)
@@ -780,11 +785,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not user:
+    if not user or not update.message:
         return
 
     deleted_count, disk_paths = db.clear_photo_buffer(user.id)
-    # Remove files from temp directory immediately
+    USER_STATUS_MSGS.pop(user.id, None)
+
     for path in disk_paths:
         try:
             p = Path(path)
@@ -804,19 +810,36 @@ async def photo_receiver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     db.register_user_if_not_exists(user)
     photo_item = update.message.photo[-1]
 
-    # Optionally persist photo file locally in TEMP_DIR for processing
+    # Download file locally
     file_obj = await photo_item.get_file()
     temp_file_path = TEMP_DIR / f"upload_{user.id}_{int(time.time()*1000)}.jpg"
     await file_obj.download_to_drive(custom_path=temp_file_path)
 
     count = db.add_photo_to_buffer(user.id, photo_item.file_id, str(temp_file_path))
 
-    await update.message.reply_text(f"📷 Photo received ({count} in buffer). Send more or type `/done` when finished!", parse_mode="Markdown")
+    msg_text = f"📷 **Photos received:** `{count}` in buffer.\n\nSend more or type `/done` when finished!"
+
+    # Edit the existing message to update total count instead of sending a new message repeatedly
+    last_msg_id = USER_STATUS_MSGS.get(user.id)
+    if last_msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=last_msg_id,
+                text=msg_text,
+                parse_mode="Markdown",
+            )
+            return
+        except Exception:
+            pass  # Fall back to sending a new message if editing fails
+
+    sent_msg = await update.message.reply_text(msg_text, parse_mode="Markdown")
+    USER_STATUS_MSGS[user.id] = sent_msg.message_id
 
 
 async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not user:
+    if not user or not update.message:
         return
 
     db_user = db.register_user_if_not_exists(user)
@@ -825,6 +848,9 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not buffer_items:
         await update.message.reply_text("❌ No photos found in upload buffer. Send photos first!")
         return
+
+    # Clear status tracker message
+    USER_STATUS_MSGS.pop(user.id, None)
 
     total_photos = len(buffer_items)
     required_collages = math.ceil(total_photos / MAX_COLLAGE_LIMIT)
@@ -850,6 +876,8 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for idx, chunk in enumerate(chunks, start=1):
             image_bytes_list: List[bytes] = []
 
+            await status_msg.edit_text(f"⚙️ Rendering **Collage {idx} of {len(chunks)}**...", parse_mode="Markdown")
+
             for item in chunk:
                 local_path = item.get("file_path")
                 # Try reading from disk first
@@ -861,30 +889,49 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     except Exception as err:
                         logger.warning(f"Failed reading disk file {local_path}: {err}")
 
-                # Fallback to downloading via file_id
-                f_obj = await context.bot.get_file(item["file_id"])
-                b_data = await f_obj.download_as_bytearray()
-                image_bytes_list.append(bytes(b_data))
+                # Download with retry mechanism to prevent network timeouts
+                for attempt in range(3):
+                    try:
+                        f_obj = await context.bot.get_file(item["file_id"], read_timeout=60, write_timeout=60)
+                        b_data = await f_obj.download_as_bytearray()
+                        image_bytes_list.append(bytes(b_data))
+                        break
+                    except (NetworkError, TelegramError) as dl_err:
+                        if attempt == 2:
+                            logger.error(f"Failed downloading file_id {item['file_id']} after 3 attempts: {dl_err}")
+                        await asyncio.sleep(2)
+
+            if not image_bytes_list:
+                logger.warning(f"Skipping empty or unreadable collage chunk {idx}")
+                continue
 
             collage_jpeg = CollageEngine.render_collage(image_bytes_list)
 
-            await update.message.reply_photo(
+            # Send collage with custom timeout
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
                 photo=collage_jpeg,
-                caption=f"✨ **Collage Part {idx} of {len(chunks)}** ({len(chunk)} photos)",
+                caption=f"✨ **Collage Part {idx} of {len(chunks)}** ({len(image_bytes_list)} photos)",
                 parse_mode="Markdown",
+                read_timeout=60,
+                write_timeout=60,
             )
 
-        # Clear photo buffer and trigger GC sweep for disk temp files
+            # Small pause between chunks to keep connection stable
+            await asyncio.sleep(2)
+
+        # Clear buffer only after all parts are rendered
         _, disk_paths = db.clear_photo_buffer(user.id)
         for path_str in disk_paths:
             if path_str:
                 p = Path(path_str)
                 if p.exists():
-                    p.unlink()
+                    try:
+                        p.unlink()
+                    except Exception as unl_err:
+                        logger.warning(f"Failed cleaning temp file {p}: {unl_err}")
 
-        # Run memory garbage collection after rendering
         gc_engine.clean_memory_garbage()
-
         await status_msg.edit_text("✅ All collages generated and delivered successfully!")
 
     except Exception as e:
