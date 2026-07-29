@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: telegram-collage-bot
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python alexx.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
