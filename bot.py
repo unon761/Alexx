@@ -66,8 +66,8 @@ logging.basicConfig(
 logger = logging.getLogger("CollageBotSuite")
 
 # Core Environment Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8824882366:AAFwQPwk3CZZ2XPZkY_LoGw7unb103sCulk")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "2077444542"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
 DB_FILE = str(BASE_DIR / "collage_bot_v2.db")
 
 # Collage & Billing Constants
@@ -1116,7 +1116,7 @@ async def post_init_setup(application: Application) -> None:
     logger.info("Garbage Collection background worker task scheduled.")
 
 
-def main() -> None:
+async def async_main() -> None:
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE" or not BOT_TOKEN:
         print("ERROR: BOT_TOKEN is missing! Set it in your environment variables.")
         sys.exit(1)
@@ -1147,7 +1147,20 @@ def main() -> None:
     app.add_handler(CommandHandler("vacuum", vacuum_db_command))
 
     logger.info("Bot & Garbage Collector system starting polling...")
-    app.run_polling(drop_pending_updates=True)
+    
+    # Initialize and start polling asynchronously to avoid unawaited coroutine warnings
+    async with app:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        await asyncio.Event().wait()
+
+
+def main() -> None:
+    try:
+        asyncio.run(async_main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped gracefully.")
 
 
 if __name__ == "__main__":
