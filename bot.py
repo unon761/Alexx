@@ -67,7 +67,13 @@ logger = logging.getLogger("CollageBotSuite")
 
 # Core Environment Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8824882366:AAFwQPwk3CZZ2XPZkY_LoGw7unb103sCulk")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "2077444542"))
+
+# Multi-Admin Support: Add primary admin IDs here
+ADMIN_IDS: Set[int] = {
+    int(os.getenv("ADMIN_ID_1", "7568676840")),
+    int(os.getenv("ADMIN_ID_2", "2077444542")),
+}
+
 DB_FILE = str(BASE_DIR / "collage_bot_v2.db")
 
 # Collage & Billing Constants
@@ -89,7 +95,29 @@ BG_COLOR = (240, 240, 240)
 # Message Status Tracker (Keeps track of message IDs for editing update counts)
 USER_STATUS_MSGS: Dict[int, int] = {}
 
+DEFAULT_PRICING_TEXT = """💸 **CollageVerse Service Pricing & VIP Plans**
 
+🎨 **Standard Pay-Per-Collage Costs:**
+• **1-10 Images:** 1 Coin (₹0.5)
+• **11-20 Images:** 2 Coins (₹1)
+• **21-30 Images:** 3 Coins (₹1.5)
+• ©️ **Add Watermark:** +1 Coin (Pay once per collage, edit unlimited times!)
+
+🪙 **Coin Exchange Rate:**
+• **1 Collageverse Coin** = ₹0.5 INR
+
+👑 **UNLIMITED VIP MEMBERSHIPS (Best Strategy!):**
+Unlock unlimited generations with zero coin costs. Tracked strictly down to the exact minute!
+
+⚡ **1-Day Pass:** ₹20 (Perfect for instant, urgent drops!)
+🚀 **7-Day Pass:** ₹200 (Great aggressive weekly booster)
+👑 **1-Month Pass:** ₹400 (Absolute best value for serious sellers!)
+❄️ **1-Year Pass:** ₹800 (Best collage by our bot)
+
+💳 **How to Buy / Activate:**
+Contact the owners directly:
+👤 @ALEXX_00_1
+👤 @Tanjiro7709"""
 # ==============================================================================
 # SECTION 2: DATABASE PERSISTENCE LAYER WITH GC SUPPORT
 # ==============================================================================
@@ -97,7 +125,7 @@ USER_STATUS_MSGS: Dict[int, int] = {}
 class DatabaseManager:
     """
     Handles SQLite transactions, user entitlements, buffered file queues,
-    audit activity logging, and database garbage collection routines.
+    audit activity logging, dynamic pricing text, and database garbage collection routines.
     """
 
     def __init__(self, db_path: str = DB_FILE):
@@ -174,6 +202,24 @@ class DatabaseManager:
                 """
             )
 
+            # Settings / Config table for persistent dynamic text like /pricing
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+
+            # Insert default pricing text if not present
+            cursor.execute("SELECT value FROM bot_settings WHERE key = 'pricing_text'")
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO bot_settings (key, value) VALUES ('pricing_text', ?)",
+                    (DEFAULT_PRICING_TEXT,),
+                )
+
             # Create Indexes for query performance & GC sweeping
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_photo_buffer_user ON photo_buffer(user_id);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_photo_buffer_time ON photo_buffer(added_at);")
@@ -181,8 +227,24 @@ class DatabaseManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_sub ON users(subscription_until);")
 
             conn.commit()
-            logger.info("Database initialized successfully with garbage auditing schemas.")
+            logger.info("Database initialized successfully with multi-admin support & pricing schemas.")
 
+    def get_pricing_text(self) -> str:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM bot_settings WHERE key = 'pricing_text'")
+            row = cursor.fetchone()
+            return row["value"] if row else DEFAULT_PRICING_TEXT
+
+    def set_pricing_text(self, new_text: str) -> None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO bot_settings (key, value) VALUES ('pricing_text', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (new_text,),
+            )
+            conn.commit()
     def register_user_if_not_exists(self, user: User) -> Dict[str, Any]:
         """Registers or updates user active status."""
         with self._get_connection() as conn:
@@ -726,7 +788,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"👋 **Welcome to Collage Creator Bot, {user.first_name}!**\n\n"
         f"📷 Send photos individually or in batches.\n"
         f"⚡ Type `/done` when finished to generate your collage.\n"
-        f"🧹 Send `/clear` to reset your uploaded photo queue.\n\n"
+        f"🧹 Send `/clear` to reset your uploaded photo queue.\n"
+        f"💸 Type `/pricing` to view rates & unlimited VIP passes.\n\n"
         f"💳 **Your Profile Balance**:\n"
         f"• 🎁 **Free Trials Remaining**: `{db_user['free_trials']}`\n"
         f"• 🪙 **Coins Balance**: `{db_user['coins']}`\n"
@@ -736,11 +799,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📜 Account Status", callback_data="check_status")],
+            [InlineKeyboardButton("📜 Account Status", callback_data="check_status"),
+             InlineKeyboardButton("💸 Pricing & VIP", callback_data="show_pricing")],
             [InlineKeyboardButton("ℹ️ Layout Guide", callback_data="show_help")],
         ]
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+async def pricing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/pricing` - Displays pricing plans and VIP memberships."""
+    text = db.get_pricing_text()
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("👤 Contact Owner 1", url="https://t.me/ALEXX_00_1"),
+                InlineKeyboardButton("👤 Contact Owner 2", url="https://t.me/Tanjiro7709"),
+            ]
+        ]
+    )
+
+    if update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    elif update.message:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -800,8 +883,6 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.warning(f"Failed removing cleared photo file {path}: {e}")
 
     await update.message.reply_text(f"🧹 Cleared `{deleted_count}` buffered photo(s) from memory and disk.", parse_mode="Markdown")
-
-
 async def photo_receiver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user or not update.message or not update.message.photo:
@@ -863,7 +944,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"• Uploaded photos: `{total_photos}`\n"
             f"• Required collages: `{required_collages}`\n"
             f"• Trials Left: `{db_user['free_trials']}` | Coins: `{db_user['coins']}`\n\n"
-            f"Contact Admin to purchase coins or subscriptions!",
+            f"Type `/pricing` to view coin rates or buy a VIP Pass!",
             parse_mode="Markdown",
         )
         return
@@ -944,7 +1025,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 def admin_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        if not user or user.id != ADMIN_ID:
+        if not user or user.id not in ADMIN_IDS:
             if update.message:
                 await update.message.reply_text("⛔ **Unauthorized Access**: Admin only command.")
             return
@@ -1008,6 +1089,18 @@ async def removesub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f"🛑 Subscription immediately expired for user `{target_id}`.", parse_mode="Markdown")
     except Exception:
         await update.message.reply_text("Usage: `/removesub <user_id>`", parse_mode="Markdown")
+
+
+@admin_only
+async def setpricing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/setpricing <new_pricing_text>` - Admin command to update the pricing menu dynamically."""
+    if not context.args:
+        await update.message.reply_text("Usage: `/setpricing <new formatted markdown pricing text>`", parse_mode="Markdown")
+        return
+
+    new_text = " ".join(context.args)
+    db.set_pricing_text(new_text)
+    await update.message.reply_text("✅ **Pricing menu text updated successfully!** Users will now see this new text on `/pricing`.", parse_mode="Markdown")
 
 
 @admin_only
@@ -1096,6 +1189,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if query.data == "check_status":
         await status_command(update, context)
+    elif query.data == "show_pricing":
+        await pricing_command(update, context)
     elif query.data == "show_help":
         await help_command(update, context)
 
@@ -1105,6 +1200,7 @@ async def post_init_setup(application: Application) -> None:
     commands = [
         BotCommand("start", "Start bot & view balance"),
         BotCommand("done", "Generate collages from photos"),
+        BotCommand("pricing", "View rates & VIP passes"),
         BotCommand("status", "Check status & subscription"),
         BotCommand("clear", "Clear photo upload buffer"),
         BotCommand("help", "View layout guide"),
@@ -1127,6 +1223,7 @@ async def async_main() -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler(["status", "profile"], status_command))
+    app.add_handler(CommandHandler("pricing", pricing_command))
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("done", done_command))
 
@@ -1139,6 +1236,7 @@ async def async_main() -> None:
     app.add_handler(CommandHandler("removecoins", removecoins_cmd))
     app.add_handler(CommandHandler("addsub", addsub_cmd))
     app.add_handler(CommandHandler("removesub", removesub_cmd))
+    app.add_handler(CommandHandler("setpricing", setpricing_cmd))
     app.add_handler(CommandHandler("userinfo", userinfo_cmd))
 
     # Garbage System Admin Control Routes
@@ -1147,7 +1245,7 @@ async def async_main() -> None:
     app.add_handler(CommandHandler("vacuum", vacuum_db_command))
 
     logger.info("Bot & Garbage Collector system starting polling...")
-    
+
     # Initialize and start polling asynchronously to avoid unawaited coroutine warnings
     async with app:
         await app.initialize()
